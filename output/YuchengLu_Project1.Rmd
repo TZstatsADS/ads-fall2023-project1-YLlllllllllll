@@ -1,0 +1,440 @@
+---
+title: "Project1"
+author: "Yucheng Lu"
+date: "2023-09-19"
+output: pdf_document
+---
+
+```{r libraries, include=FALSE, echo=FALSE}
+# Load necessary libraries
+library(word2vec)
+library(tidytext)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(uwot)
+library(udpipe)
+library(topicmodels)
+library(tm)
+library(tibble)
+library(wordcloud2)
+library(RColorBrewer)
+library(slam)
+library(tidyverse)
+library(DT)
+library(textstem)
+```
+
+```{r read data, warning=FALSE, message=FALSE}
+# Set the URL of the dataset
+urlfile<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/cleaned_hm.csv'
+hm_data <- read_csv(urlfile)
+
+# Preprocessing: Convert to lowercase, remove punctuation, numbers, whitespace, and perform stemming
+corpus <- VCorpus(VectorSource(hm_data$cleaned_hm))%>%
+  tm_map(content_transformer(tolower))%>%
+  tm_map(removePunctuation)%>%
+  tm_map(removeNumbers)%>%
+  tm_map(removeWords, character(0))%>%
+  tm_map(stripWhitespace)
+
+stemmed <- tm_map(corpus, stemDocument) %>%
+  tidy() %>%
+  select(text)
+
+dict <- tidy(corpus) %>%
+  select(text) %>%
+  unnest_tokens(dictionary, text)
+dict
+
+data("stop_words")
+print(stop_words)
+word <- c("happy","ago","yesterday","lot","today","months","month",
+                 "happier","happiest","last","week","past")
+
+stop_words <- stop_words %>%
+  bind_rows(mutate(tibble(word), lexicon = "updated"))
+
+completed <- stemmed %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(stems, text) %>%
+  bind_cols(dict) %>%
+  anti_join(stop_words, by = c("dictionary" = "word"))
+
+completed <- completed %>%
+  group_by(stems) %>%
+  count(dictionary) %>%
+  mutate(word = dictionary[which.max(n)]) %>%
+  ungroup() %>%
+  select(stems, word) %>%
+  distinct() %>%
+  right_join(completed) %>%
+  select(-stems)
+
+completed <- completed %>%
+  group_by(id) %>%
+  summarise(text = str_c(word, collapse = " ")) %>%
+  ungroup()
+
+completed
+
+hm <- hm_data %>%
+  mutate(id = row_number()) %>%
+  inner_join(completed)
+
+datatable(hm)
+
+dir.create("../output", showWarnings = FALSE)  # create output dir if it doesn't exist
+write_csv(hm, "../output/processed_moments.csv")
+```
+
+
+```{r data, warning=FALSE, echo=FALSE}
+# Read the cleaned data and demographic data
+pathfile <- '../output/processed_moments.csv'
+cleaned_data <- read.csv(pathfile)
+demo_data <- read.csv('https://raw.githubusercontent.com/megagonlabs/HappyDB/master/happydb/data/demographic.csv')
+head(cleaned_data$cleaned_hm)
+head(demo_data)
+```
+
+```{r}
+# Define a function to run topic modeling on the data
+
+run_topic_model <- function(data) {
+  # self defined stop words
+  word <- c("happy","ago","yesterday","lot","today","months","month",
+            "happier","happiest","last","week","past")
+  # combine
+  stop_words <- stop_words %>%
+    bind_rows(mutate(tibble(word), lexicon = "updated"))
+  updated_stop_words <- as.vector(stop_words$word)
+  
+  # Create a corpus
+  corpus <- Corpus(VectorSource(data$cleaned_hm))
+  # 文本预处理
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, lemmatize_strings)
+  corpus <- tm_map(corpus, removeWords, updated_stop_words)
+  
+  # Create Document Term Matrix
+  dtm <- DocumentTermMatrix(corpus, control = list(minWordLength = 3, maxDocFreq = 0.5))
+  
+  # The size is too big to process, so divide into 1000 small chunks
+  filtered_dtm <- dtm[1:2, ]  # 选择前两行
+  filtered_dtm <- filtered_dtm[-(1:nDocs(filtered_dtm)), ]  # 删除这两行
+  
+  chunk_size <- 1000
+  num_rows <- nDocs(dtm)
+  for(i in seq(1, num_rows, by = chunk_size)) {
+    end_idx <- min(i + chunk_size - 1, num_rows)
+    sub_dtm <- dtm[i:end_idx, ]
+    rowTotals <- row_sums(sub_dtm)
+    filtered_sub_dtm <- sub_dtm[rowTotals > 0, ]
+    filtered_dtm <- rbind(filtered_dtm, filtered_sub_dtm)
+  }
+  
+  # Train LDA model
+  lda_model <- LDA(filtered_dtm, k = 15)  
+  # extract top 5 words under each topic
+  term_matrix <- terms(lda_model, 5)
+  # Gather distributions
+  theta <- posterior(lda_model)$topics
+  
+  return(list(term_matrix = term_matrix, theta = theta))
+}
+
+result <- run_topic_model(cleaned_data)
+
+term_matrix <- result$term_matrix
+theta <- result$theta
+
+print(term_matrix)
+```
+
+```{r}
+# Define labels for 15 Topic
+topic_labels <- c(
+    "Topic 1" = "Social",
+    "Topic 2" = "Emotion",
+    "Topic 3" = "School",
+    "Topic 4" = "Family",
+    "Topic 5" = "Bonding",
+    "Topic 6" = "Leisure",
+    "Topic 7" = "Routine",
+    "Topic 8" = "College",
+    "Topic 9" = "Family Time",
+    "Topic 10" = "Friend",
+    "Topic 11" = "Celebration",
+    "Topic 12" = "Socializing",
+    "Topic 13" = "Study",
+    "Topic 14" = "Interaction",
+    "Topic 15" = "Achievement"
+)
+# Assign labels to the topics
+colnames(term_matrix) <- topic_labels
+print(term_matrix)
+```
+
+```{r}
+# Classify documents based on their highest topic probability
+max_topic <- apply(theta, 1, which.max)
+classified_docs <- data.frame(Document = rownames(theta), Max_Topic = max_topic)
+classified_docs$Topic_Label <- topic_labels[classified_docs$Max_Topic]
+head(classified_docs)
+```
+
+
+```{r}
+# Plot topic frequencies
+topic_frequency <- table(classified_docs$Topic_Label)
+# ggplot
+ggplot(as.data.frame(topic_frequency), aes(x = Var1, y = Freq)) +
+  geom_bar(stat = "identity") +
+  xlab("Topics") +
+  ylab("Frequency") +
+  ggtitle("Topic Frequencies") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+# Create a word cloud visualization of topic frequencies
+color_list = brewer.pal(5, "Set1")
+
+# Try a different scaling function, like square root
+scaled_frequency <- (as.vector(topic_frequency))^2 # augment the differences between word frequencies
+names(scaled_frequency) <- names(topic_frequency)
+
+# wordcloud2 draw
+wordcloud2(data.frame(
+  word = names(scaled_frequency),
+  freq = scaled_frequency,
+  color = sample(color_list, length(scaled_frequency), replace = TRUE)
+),
+backgroundColor = 'pink',
+size = 0.6,
+shape = 'cardioid',  # Change shape to 'cardioid'
+minRotation = -pi/2, # Minimum rotation in radians
+maxRotation = pi/2,  # Maximum rotation in radians
+minSize = 5,        # Minimum font size
+ellipticity = 0.6   # Adjust the shape ellipticity
+)
+```
+
+
+```{r}
+# Combine the cleaned data with demographic data and add age information
+# adding age info
+age_df <- merge(cleaned_data, demo_data)
+age_df[!is.na(as.numeric(age_df$age, warn = FALSE)), ]
+
+# change to float number
+age_df$age <- as.numeric(age_df$age)
+
+# delete NAs
+age_df <- age_df[!is.na(age_df$age),]
+
+# create age groups
+age_groups <- cut(age_df$age, breaks = seq(0, 100, by = 20), right = FALSE)
+
+age_df$age_group <- age_groups
+
+age_groups <- sort(unique(age_df$age_group))
+
+results_list <- list()
+
+for(age_group in age_groups) {
+  sub_df <- age_df[age_df$age_group == age_group, ]
+  result <- run_topic_model(sub_df)
+  results_list[[as.character(age_group)]] <- result
+}
+
+for(age_group in names(results_list)) {
+  result <- results_list[[age_group]]
+  term_matrix <- result$term_matrix
+  theta <- result$theta
+  print(term_matrix)
+}
+
+```
+
+
+
+
+```{r}
+# Define topic labels for different age groups
+topic_labels_0_20 <- c(
+    "Topic 1" = "Technology & Friends",
+    "Topic 2" = "Celebrations",
+    "Topic 3" = "School Break",
+    "Topic 4" = "Relationships",
+    "Topic 5" = "Gaming",
+    "Topic 6" = "Love & Work",
+    "Topic 7" = "Purchases",
+    "Topic 8" = "Personal Events",
+    "Topic 9" = "Home Activities",
+    "Topic 10" = "Academic Progress",
+    "Topic 11" = "Pleasant Mornings",
+    "Topic 12" = "Success & Endings",
+    "Topic 13" = "Personal Celebrations",
+    "Topic 14" = "Relaxation",
+    "Topic 15" = "Achievements"
+)
+
+topic_labels_20_40 <- c(
+    "Topic 1" = "Family Meals",
+    "Topic 2" = "Love & Time",
+    "Topic 3" = "Personal Purchases",
+    "Topic 4" = "Time Spent",
+    "Topic 5" = "Homely Nights",
+    "Topic 6" = "Games & Meals",
+    "Topic 7" = "Achievements",
+    "Topic 8" = "Family Time",
+    "Topic 9" = "Spiritual Visits",
+    "Topic 10" = "Friendships",
+    "Topic 11" = "Evening Activities",
+    "Topic 12" = "Personal Wins",
+    "Topic 13" = "Learning & Watching",
+    "Topic 14" = "Rest & Family",
+    "Topic 15" = "Surprises & Exams"
+)
+
+topic_labels_40_60 <- c(
+    "Topic 1" = "Family Activities",
+    "Topic 2" = "Social Meals",
+    "Topic 3" = "Day's Activities",
+    "Topic 4" = "Family Love",
+    "Topic 5" = "Family Pets",
+    "Topic 6" = "Movies & Endings",
+    "Topic 7" = "Daily Life",
+    "Topic 8" = "Gifts & Home",
+    "Topic 9" = "Travel & Leisure",
+    "Topic 10" = "Outdoor Activities",
+    "Topic 11" = "Shopping & Meals",
+    "Topic 12" = "Fun with Grandchildren",
+    "Topic 13" = "Local Experiences",
+    "Topic 14" = "Personal Activities",
+    "Topic 15" = "Calls & Reading"
+)
+
+topic_labels_60_80 <- c(
+    "Topic 1" = "Investments",
+    "Topic 2" = "Personal Time",
+    "Topic 3" = "Gardening",
+    "Topic 4" = "Local Pets",
+    "Topic 5" = "Shopping & Gifts",
+    "Topic 6" = "Morning Meals",
+    "Topic 7" = "Financials",
+    "Topic 8" = "Morning Walks",
+    "Topic 9" = "Travel & Sightseeing",
+    "Topic 10" = "Morning Enjoyment",
+    "Topic 11" = "Beauty & Pets",
+    "Topic 12" = "Family Activities",
+    "Topic 13" = "Pet Care",
+    "Topic 14" = "Family Visits",
+    "Topic 15" = "April Activities"
+)
+
+topic_labels_80_100 <- c(
+    "Topic 1" = "Investment Decisions",
+    "Topic 2" = "Time & Acceptance",
+    "Topic 3" = "Planting",
+    "Topic 4" = "Local Care",
+    "Topic 5" = "Shopping & Receiving",
+    "Topic 6" = "Morning Meals",
+    "Topic 7" = "Financial Transactions",
+    "Topic 8" = "Pleasant Mornings",
+    "Topic 9" = "Boat Rides",
+    "Topic 10" = "Morning Beverages",
+    "Topic 11" = "Beautiful Pets",
+    "Topic 12" = "Teaching & Raising",
+    "Topic 13" = "Pet Surgery",
+    "Topic 14" = "Family Time",
+    "Topic 15" = "Vehicle Enjoyment"
+)
+
+topic_labels_list <- list(
+  "0-20" = topic_labels_0_20,
+  "20-40" = topic_labels_20_40,
+  "40-60" = topic_labels_40_60,
+  "60-80" = topic_labels_60_80,
+  "80-100" = topic_labels_80_100
+)
+```
+
+
+```{r}
+# For each age group, create a word cloud of topic frequencies, the word cloud html file is saved into the local
+for (i in 1:5) {
+  current_labels <- topic_labels_list[[i]]
+  result <- results_list[[i]]
+  age_group_name <- names(results_list)[i]
+  cat("Age Group:", age_group_name, "\n")
+  term_matrix <- result$term_matrix
+  theta <- result$theta
+  
+  # Step 1: Assign Topic Labels
+  colnames(term_matrix) <- current_labels
+  max_topic <- apply(theta, 1, which.max)
+  classified_docs <- data.frame(Document = rownames(theta), Max_Topic = max_topic)
+  classified_docs$Topic_Label <- current_labels[classified_docs$Max_Topic]
+  head(classified_docs)
+  
+  topic_frequency <- table(classified_docs$Topic_Label)
+  
+  # Generate a better color list
+  color_list = brewer.pal(5, "Set1")
+  
+  # Try a different scaling function, like square root
+  scaled_frequency <- (as.vector(topic_frequency))^3 # augment the differences between word frequencies
+  names(scaled_frequency) <- names(topic_frequency)
+  
+  # wordcloud2 draw
+  wc <- wordcloud2(data.frame(
+    word = names(scaled_frequency),
+    freq = scaled_frequency,
+    color = sample(color_list, length(scaled_frequency), replace = TRUE)
+  ),
+  backgroundColor = 'pink',
+  size = 0.6,
+  shape = 'cardioid',
+  minRotation = -pi/2,
+  maxRotation = pi/2,
+  ellipticity = 0.6
+  )
+  
+  # Save the wordcloud2 as an HTML file
+  saveWidget(wc, file = paste0("wordcloud_", i, ".html"))
+}
+```
+
+Conclusion:
+
+As we journey through life, the sources of our happiness evolve. Drawing insights from the HappyDB dataset, we traced this emotional evolution across various age groups, revealing a fascinating pattern:
+
+Youth (0-20 years): At this vibrant age, social interactions and work take center stage. Young individuals find joy in building relationships, navigating school, and embarking on their first jobs.
+
+Early Adulthood (20-40 years): As people settle into their lives, family emerges as a beacon of happiness. These years are colored by cherished moments with loved ones, raising children, and establishing a home.
+
+Middle Age (40-60 years): With a bit more leisure and perhaps an "empty nest", individuals gravitate towards the outdoors, pets, and the sheer delight of spending time with grandchildren.
+
+Retirement (60-80 years): Financial stability becomes paramount, with a focus on investments. Yet, life isn't all about money. The joy of traveling and the companionship of pets remain constant sources of happiness.
+
+Golden Years (80-100 years): As the pace of life slows, people savor the simple pleasures. A hearty breakfast, a satisfying shopping trip, or a wise investment decision - these small joys become the highlights of everyday life.
+
+In essence, while the sources of happiness shift, the pursuit remains constant. From youth to old age, every stage offers its unique blend of joys, painting a rich tapestry of human experience.
+
+Happy moments:
+
+1: "My aunt adopted a German Shepherd, and I absolutely love it. It's such a joy to have around!"
+
+2: "I received a response to my job application, and they were very encouraging. It made my day!"
+
+3: "One of my favorite games had an update, and it's really interesting. I'm excited to explore the new features!"
+
+Data Story: At 24 years of age, I find it fitting to categorize my joyful experiences within the 0-20 and 20-40 age intervals. Reflecting on my personal moments of happiness and comparing them to insights drawn from the HappyDB analysis, the accuracy of the conclusions is evident. Key themes like work, family, and social interactions resonate with my own experiences, specifically two out of the three. This alignment further attests to the credibility and relatability of the HappyDB dataset.
+
+
