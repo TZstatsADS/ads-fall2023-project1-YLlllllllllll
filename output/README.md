@@ -7,5 +7,5 @@ Output: The rendered outputs of the analyses for the five sub-age groups can be 
 
 Note on Word Cloud: If you execute the entire project1.rmd file, you might observe a different word cloud on your local machine. This is because wordcloud2 generates images with an element of randomness each time it runs.
 
-
+![Dog Image](https://guardiananimal.com/wp-content/uploads/2019/04/dog-1194077_1280-1080x675.jpg)
 
